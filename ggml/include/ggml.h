@@ -449,6 +449,20 @@ extern "C" {
         GGML_HINT_SRC0_IS_HADAMARD = 1,
     };
 
+    // FLASH_ATTN_EXT op_params index for KVarN's descriptor-native domain contract
+    enum ggml_flash_attn_ext_op_param {
+        GGML_FLASH_ATTN_EXT_OP_PARAM_KVARN_DOMAIN = 4,
+    };
+
+    // KVarN attention domain: whether K/V are consumed in the Hadamard-rotated
+    // domain (native) or dequantized back to the original domain first.
+    enum ggml_flash_attn_ext_kvarn_domain {
+        GGML_FLASH_ATTN_EXT_KVARN_DOMAIN_AUTO                 = 0,
+        GGML_FLASH_ATTN_EXT_KVARN_DOMAIN_ROTATED              = 1,
+        GGML_FLASH_ATTN_EXT_KVARN_DOMAIN_ORIGINAL             = 2,
+        GGML_FLASH_ATTN_EXT_KVARN_DOMAIN_ROTATED_K_ORIGINAL_V = 3,
+    };
+
     // model file types
     enum ggml_ftype {
         GGML_FTYPE_UNKNOWN        = -1,
