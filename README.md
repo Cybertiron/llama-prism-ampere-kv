@@ -1,4 +1,41 @@
-# llama.cpp
+# llama-prism · q3_K / q2_K KV cache (Ampere)
+
+**A [PrismML/llama.cpp](https://github.com/PrismML-Eng/llama.cpp) fork that adds `q3_K` and `q2_K` as KV-cache types** — big contexts on a single 24 GB card, at full prefill speed.
+
+This is the Bonsai / PrismML `prism` line with two extra `--cache-type-k` / `--cache-type-v` options:
+
+| KV type | bits/elem | KV VRAM vs q8_0 | prefill pp2048 | decode tg64 |
+|--------:|:---------:|:---------------:|:--------------:|:-----------:|
+| `q8_0` (baseline) | 8.5 | — | 1645 t/s | 48.6 t/s |
+| **`q3_K`** | ~3.4 | **~60% smaller** | **1606 t/s** | 43.3 t/s |
+| **`q2_K`** | ~2.6 | **~69% smaller** | **1566 t/s** | 40.9 t/s |
+
+<sub>RTX 3090 (sm86, CUDA 13), Bonsai-2-27B PTQ1_0, flash-attention on, matched `K==V`. Mixing different K/V types disables flash-attention (upstream limitation) — always set K and V to the **same** type.</sub>
+
+**Why it's fast:** on matched `K==V` the KV tensors are dequantized to f16 and run the existing fast f16 tensor-core kernels (MMA prefill / VEC decode), so prefill speed stays ~q8_0 while the cache shrinks by 60–69%. `q3_K` is the practical near-lossless lower bound on 27B; `q2_K` is an experimental extreme-VRAM option (clamped super-block scale; usable at moderate context, too aggressive for 256K).
+
+### Use it
+
+```bash
+# fits a much larger context in the same VRAM
+llama-server -m model.gguf -ngl 99 -fa 1 -c 262144 -ctk q3_K -ctv q3_K
+```
+
+Requires `n_embd_k_gqa % 256 == 0`. **Prebuilt Windows CUDA 13 / Ampere (sm86) binaries** are on the [Releases page](https://github.com/Cybertiron/llama-prism-kquant-kv/releases) — download, unzip, run. To build from source, follow the standard llama.cpp CUDA build below.
+
+### Credits
+
+- `q3_K` / `q2_K` k-quant formats: **@ikawrakow** (llama.cpp k-quants).
+- Base fork and ternary Bonsai runtime: **[PrismML-Eng/llama.cpp](https://github.com/PrismML-Eng/llama.cpp)**.
+- KV-cache integration for Ampere: this fork.
+
+### About / support
+
+Built by Cybertiron. If it saved you some VRAM:
+
+<a href="https://www.buymeacoffee.com/cybertiron"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="46"></a>
+
+---
 
 > [!IMPORTANT]
 > **This is the PrismML fork of llama.cpp**, the main line behind the [Bonsai](https://huggingface.co/collections/prism-ml/bonsai) models (branch `prism`, developed as `prism-v7`). It tracks current mainline llama.cpp and adds the fork's low-bit formats and runtime features on top.
