@@ -1,4 +1,5 @@
 #include "llama-kv-cache.h"
+#include "llama-kvarn.h"
 
 #include "gguf.h"
 #include "llama-impl.h"
@@ -248,6 +249,52 @@ llama_kv_cache::llama_kv_cache(
         map_layer_ids[il] = layers.size();
 
         layers.push_back({ il, k, v, k_stream, v_stream, });
+
+        // Full KVarN record-format storage (experimental, env-gated). Allocated
+        // in parallel with the plain k/v tensors above; when active, cpy_k/get_k
+        // route through ggml_kvarn_store/materialize instead. Single-stream,
+        // non-SWA only for now.
+        {
+            const char * ek = getenv("LLAMA_KVARN_FULL_K_BITS");
+            const char * ev = getenv("LLAMA_KVARN_FULL_V_BITS");
+            const int kb = ek ? atoi(ek) : 0;
+            const int vb = ev ? atoi(ev) : 0;
+            if ((kb > 0 || vb > 0) && n_stream == 1 && has_k && has_v) {
+                const uint32_t head_dim_k = hparams.n_embd_head_k(il);
+                const uint32_t head_dim_v = hparams.n_embd_head_v(il);
+                const uint32_t n_head_kv  = hparams.n_head_kv(il);
+                const int k_slices = llama_kvarn_head_slices(head_dim_k);
+                const int v_slices = llama_kvarn_head_slices(head_dim_v);
+                if ((kv_size % KVAR_N_GROUP) == 0) {
+                    const uint32_t stage_groups      = 2;
+                    const int64_t  groups_per_stream = kv_size / KVAR_N_GROUP;
+                    const int64_t  n_stage_tokens    = int64_t(KVAR_N_GROUP) * stage_groups; // n_stream == 1
+                    auto & L = layers.back();
+                    if (kb > 0 && k_slices > 0) {
+                        const uint32_t n_head_k_sliced = n_head_kv * (uint32_t) k_slices;
+                        const int64_t  k_rec_bytes = int64_t(llama_kvarn_packed_bytes(KVAR_N_GROUP*KVAR_N_GROUP, kb)) + 3*KVAR_N_GROUP*(int64_t)sizeof(ggml_fp16_t);
+                        ggml_tensor * kr = ggml_new_tensor_3d(ctx, GGML_TYPE_I8,  k_rec_bytes, n_head_k_sliced, groups_per_stream);
+                        ggml_tensor * ks = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, KVAR_N_GROUP, n_head_k_sliced, n_stage_tokens);
+                        ggml_format_name(kr, "cache_kvarn_k_records_l%d", il);
+                        ggml_format_name(ks, "cache_kvarn_k_stage_l%d",   il);
+                        L.k_records = kr; L.k_stage = ks; L.kvarn_k_bits = kb;
+                    }
+                    if (vb > 0 && v_slices > 0 && !v_trans) {
+                        const uint32_t n_head_v_sliced = n_head_kv * (uint32_t) v_slices;
+                        const int64_t  v_rec_bytes = int64_t(llama_kvarn_packed_bytes(KVAR_N_GROUP*KVAR_N_GROUP, vb)) + 3*KVAR_N_GROUP*(int64_t)sizeof(ggml_fp16_t);
+                        ggml_tensor * vr = ggml_new_tensor_3d(ctx, GGML_TYPE_I8,  v_rec_bytes, n_head_v_sliced, groups_per_stream);
+                        ggml_tensor * vs = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, KVAR_N_GROUP, n_head_v_sliced, n_stage_tokens);
+                        ggml_format_name(vr, "cache_kvarn_v_records_l%d", il);
+                        ggml_format_name(vs, "cache_kvarn_v_stage_l%d",   il);
+                        L.v_records = vr; L.v_stage = vs; L.kvarn_v_bits = vb;
+                    }
+                    if (il == 0) {
+                        LLAMA_LOG_INFO("%s: KVarN full records active: k_bits=%d v_bits=%d v_trans=%d groups/stream=%lld (EXPERIMENTAL)\n",
+                                __func__, kb, vb, (int) v_trans, (long long) groups_per_stream);
+                    }
+                }
+            }
+        }
     }
 
     if (reuse) {
@@ -1263,6 +1310,26 @@ ggml_tensor * llama_kv_cache::get_k(ggml_context * ctx, int32_t il, uint32_t n_k
 
     const uint32_t ns = sinfo.s1 - sinfo.s0 + 1;
 
+    // Full KVarN record-format read (experimental, env-gated): materialize this
+    // layer's stored records + F16 stage back to F16 K. Emits original-domain K
+    // so the fork's standard attn_rot rotation still applies downstream.
+    {
+        const auto & Lk = layers[ikv];
+        if (Lk.kvarn_k_bits > 0 && Lk.k_records && Lk.k_stage) {
+            ggml_tensor * stage_after = Lk.k_stage_live ? Lk.k_stage_live : Lk.k_stage;
+            ggml_tensor * indices = Lk.k_stage_live ? Lk.k_stage_live->src[1] : nullptr;
+            GGML_ASSERT(indices != nullptr && "KVarN get_k requires cpy_k earlier in the same build");
+            const int slices = llama_kvarn_head_slices(hparams.n_embd_head_k(il));
+            ggml_tensor * mat = ggml_kvarn_materialize(ctx, Lk.k_records, stage_after, indices,
+                    (int) n_kv, /*stream_start=*/0, /*n_stream=*/1, Lk.kvarn_k_bits, /*value=*/false, /*stage_groups=*/2);
+            mat->op_params[4]  = 0;      // emit original-domain K
+            mat->op_params[5]  = slices; // head-wide Hadamard slices
+            mat->op_params[6]  = 0;      // no SWA
+            mat->op_params[10] = 0;      // direct (linear) read
+            return ggml_reshape_4d(ctx, mat, hparams.n_embd_head_k(il), hparams.n_head_kv(il), n_kv, 1);
+        }
+    }
+
     return ggml_view_4d(ctx, k,
             hparams.n_embd_head_k(il), hparams.n_head_kv(il), n_kv, ns,
             ggml_row_size(k->type, hparams.n_embd_head_k(il)),
@@ -1320,6 +1387,31 @@ ggml_tensor * llama_kv_cache::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggm
             bias = ggml_cast(ctx, bias, k_cur->type);
         }
         k_cur = ggml_sub(ctx, k_cur, bias);
+    }
+
+    // Full KVarN record-format store (experimental, env-gated). Quantizes this
+    // ubatch's K into per-128-tile Sinkhorn records + F16 stage on the GPU.
+    {
+        const auto & Lk = layers[ikv];
+        if (Lk.kvarn_k_bits > 0 && Lk.k_records && Lk.k_stage) {
+            const int64_t hd_head  = k_cur->ne[0];
+            const int64_t hd_nhead = k_cur->ne[1];
+            const int64_t hd_ntok  = k_cur->ne[2];
+            const int slices = llama_kvarn_head_slices(hd_head);
+            ggml_tensor * cur = k_cur->type == GGML_TYPE_F32 ? k_cur : ggml_cast(ctx, k_cur, GGML_TYPE_F32);
+            cur = ggml_cont(ctx, cur);
+            if (slices > 1) {
+                cur = ggml_reshape_3d(ctx, cur, KVAR_N_GROUP, hd_nhead*slices, hd_ntok);
+            }
+            ggml_tensor * res = ggml_kvarn_store(ctx, cur, k_idxs, Lk.k_stage, Lk.k_records,
+                    Lk.kvarn_k_bits, /*sinkhorn_iters=*/8, /*value=*/false, /*stage_groups=*/2);
+            res->op_params[3] = (int32_t) hd_ntok; // tokens_per_stream hint (single stream)
+            res->op_params[4] = 0;                 // no SWA
+            res->op_params[5] = slices;            // head-wide Hadamard slices
+            res->op_params[9] = 1;                 // commit completed records eagerly
+            Lk.k_stage_live = res;
+            return res;
+        }
     }
 
     const int64_t n_embd_head = k_cur->ne[0];

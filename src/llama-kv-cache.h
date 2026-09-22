@@ -250,6 +250,21 @@ private:
 
         std::vector<ggml_tensor *> k_stream;
         std::vector<ggml_tensor *> v_stream;
+
+        // Full KVarN (arXiv 2606.03458) record-format storage (experimental,
+        // env-gated LLAMA_KVARN_FULL_K_BITS/V_BITS). When kvarn_*_bits > 0 the
+        // K/V for this layer is stored as per-128-tile Sinkhorn records + an F16
+        // stage ring instead of the plain quantized k/v tensor above.
+        ggml_tensor * k_records = nullptr;
+        ggml_tensor * v_records = nullptr;
+        ggml_tensor * k_stage   = nullptr;
+        ggml_tensor * v_stage   = nullptr;
+        int kvarn_k_bits = 0;
+        int kvarn_v_bits = 0;
+        // per-graph-build handoff: cpy_k publishes the store-result here so the
+        // same build's get_k can chain materialize after it (data-dependency edge).
+        mutable ggml_tensor * k_stage_live = nullptr;
+        mutable ggml_tensor * v_stage_live = nullptr;
     };
 
     bool v_trans = true;  // the value tensor is transposed
