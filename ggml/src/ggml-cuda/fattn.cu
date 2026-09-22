@@ -243,8 +243,8 @@ static void ggml_cuda_flash_attn_ext_mma_f16(ggml_backend_cuda_context & ctx, gg
 
 #define FATTN_VEC_CASE(D, type_K, type_V)                                                                        \
     {                                                                                                            \
-        const bool type_K_okay = K->type == (type_K) || (K->type == GGML_TYPE_F32 && (type_K) == GGML_TYPE_F16); \
-        const bool type_V_okay = V->type == (type_V) || (V->type == GGML_TYPE_F32 && (type_V) == GGML_TYPE_F16); \
+        const bool type_K_okay = K->type == (type_K) || ((K->type == GGML_TYPE_F32 || K->type == GGML_TYPE_Q3_K || K->type == GGML_TYPE_Q2_K) && (type_K) == GGML_TYPE_F16); \
+        const bool type_V_okay = V->type == (type_V) || ((V->type == GGML_TYPE_F32 || V->type == GGML_TYPE_Q3_K || V->type == GGML_TYPE_Q2_K) && (type_V) == GGML_TYPE_F16); \
         if (Q->ne[0] == (D) && type_K_okay && type_V_okay) {                                                     \
             ggml_cuda_flash_attn_ext_vec_case<D, type_K, type_V>(ctx, dst);                                      \
             return;                                                                                              \
@@ -348,6 +348,8 @@ static bool ggml_cuda_fattn_kv_type_supported(ggml_type type) {
 #endif // GGML_CUDA_FA_ALL_QUANTS
         case GGML_TYPE_Q4_0:
         case GGML_TYPE_Q8_0:
+        case GGML_TYPE_Q3_K:   // q3 KV: dequantized via the f16 path (need_f16_K)
+        case GGML_TYPE_Q2_K:   // q2 KV: same f16 dequant path
         case GGML_TYPE_BF16:
             return true;
         default:
@@ -554,8 +556,9 @@ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * d
             need_f16_V = true;
             break;
         case BEST_FATTN_KERNEL_VEC:
-            need_f16_K = K->type == GGML_TYPE_F32;
-            need_f16_V = V->type == GGML_TYPE_F32;
+            // q3_K/q2_K have no VEC-kernel dequant, so force the f16 conversion (like F32)
+            need_f16_K = K->type == GGML_TYPE_F32 || K->type == GGML_TYPE_Q3_K || K->type == GGML_TYPE_Q2_K;
+            need_f16_V = V->type == GGML_TYPE_F32 || V->type == GGML_TYPE_Q3_K || V->type == GGML_TYPE_Q2_K;
             break;
         case BEST_FATTN_KERNEL_NONE:
             break;
