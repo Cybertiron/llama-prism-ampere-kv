@@ -331,14 +331,32 @@ static ggml_type kv_cache_type_from_str(const std::string & s) {
 // practical KVarN tiers map directly to the fork's matched low-bit KV types;
 // `-ctk kvarn3` == q3_K storage + auto-Hadamard. The paper's extra per-tile
 // Sinkhorn dual-axis scaling (record format) is not applied by this alias.
-static bool kvarn_kv_cache_type(const std::string & s, ggml_type * out) {
-    if      (s == "kvarn2") *out = GGML_TYPE_Q2_K;
-    else if (s == "kvarn3") *out = GGML_TYPE_Q3_K;
-    else if (s == "kvarn4") *out = GGML_TYPE_Q4_0;
-    else if (s == "kvarn5") *out = GGML_TYPE_Q5_0;
-    else if (s == "kvarn6") *out = GGML_TYPE_Q5_1;
-    else if (s == "kvarn8") *out = GGML_TYPE_Q8_0;
+static bool kvarn_kv_cache_type(const std::string & s, bool is_key, ggml_type * out) {
+    // Hadamard-rotation aliases (map to a matched low-bit type; rotation is automatic).
+    if      (s == "kvarn2") { *out = GGML_TYPE_Q2_K; return true; }
+    else if (s == "kvarn3") { *out = GGML_TYPE_Q3_K; return true; }
+    else if (s == "kvarn4") { *out = GGML_TYPE_Q4_0; return true; }
+    else if (s == "kvarn5") { *out = GGML_TYPE_Q5_0; return true; }
+    else if (s == "kvarn6") { *out = GGML_TYPE_Q5_1; return true; }
+    else if (s == "kvarn8") { *out = GGML_TYPE_Q8_0; return true; }
+    // Full paper-faithful variants "kvarnNf" (Sinkhorn record format, experimental):
+    // signal the KV cache via env; storage type is a placeholder (records are separate).
+    int full_bits = 0;
+    if      (s == "kvarn2f") full_bits = 2;
+    else if (s == "kvarn3f") full_bits = 3;
+    else if (s == "kvarn4f") full_bits = 4;
+    else if (s == "kvarn5f") full_bits = 5;
+    else if (s == "kvarn6f") full_bits = 6;
+    else if (s == "kvarn8f") full_bits = 8;
     else return false;
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%d", full_bits);
+#ifdef _WIN32
+    _putenv_s(is_key ? "LLAMA_KVARN_FULL_K_BITS" : "LLAMA_KVARN_FULL_V_BITS", buf);
+#else
+    setenv(is_key ? "LLAMA_KVARN_FULL_K_BITS" : "LLAMA_KVARN_FULL_V_BITS", buf, 1);
+#endif
+    *out = GGML_TYPE_F16; // placeholder; cache routes through KVarN records from env
     return true;
 }
 
@@ -347,7 +365,7 @@ static std::string get_all_kv_cache_types() {
     for (const auto & type : kv_cache_types) {
         msg << ggml_type_name(type) << (&type == &kv_cache_types.back() ? "" : ", ");
     }
-    msg << ", kvarn2, kvarn3, kvarn4, kvarn5, kvarn6, kvarn8";
+    msg << ", kvarn2, kvarn3, kvarn4, kvarn5, kvarn6, kvarn8, kvarn3f, kvarn2f";
     return msg.str();
 }
 
@@ -2454,7 +2472,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         ),
         [](common_params & params, const std::string & value) {
             ggml_type kvarn_t;
-            if (kvarn_kv_cache_type(value, &kvarn_t)) {
+            if (kvarn_kv_cache_type(value, /*is_key=*/true, &kvarn_t)) {
                 params.cache_type_k = kvarn_t;
             } else {
                 params.cache_type_k = kv_cache_type_from_str(value);
@@ -2472,7 +2490,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         ),
         [](common_params & params, const std::string & value) {
             ggml_type kvarn_t;
-            if (kvarn_kv_cache_type(value, &kvarn_t)) {
+            if (kvarn_kv_cache_type(value, /*is_key=*/false, &kvarn_t)) {
                 params.cache_type_v = kvarn_t;
             } else {
                 params.cache_type_v = kv_cache_type_from_str(value);

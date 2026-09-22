@@ -1351,6 +1351,24 @@ ggml_tensor * llama_kv_cache::get_v(ggml_context * ctx, int32_t il, uint32_t n_k
 
     const uint32_t ns = sinfo.s1 - sinfo.s0 + 1;
 
+    // Full KVarN record-format read for V (experimental, env-gated; non-transposed V only).
+    {
+        const auto & Lv = layers[ikv];
+        if (Lv.kvarn_v_bits > 0 && Lv.v_records && Lv.v_stage && !v_trans) {
+            ggml_tensor * stage_after = Lv.v_stage_live ? Lv.v_stage_live : Lv.v_stage;
+            ggml_tensor * indices = Lv.v_stage_live ? Lv.v_stage_live->src[1] : nullptr;
+            GGML_ASSERT(indices != nullptr && "KVarN get_v requires cpy_v earlier in the same build");
+            const int slices = llama_kvarn_head_slices(hparams.n_embd_head_v(il));
+            ggml_tensor * mat = ggml_kvarn_materialize(ctx, Lv.v_records, stage_after, indices,
+                    (int) n_kv, /*stream_start=*/0, /*n_stream=*/1, Lv.kvarn_v_bits, /*value=*/true, /*stage_groups=*/2);
+            mat->op_params[4]  = 0;
+            mat->op_params[5]  = slices;
+            mat->op_params[6]  = 0;
+            mat->op_params[10] = 0;
+            return ggml_reshape_4d(ctx, mat, hparams.n_embd_head_v(il), hparams.n_head_kv(il), n_kv, 1);
+        }
+    }
+
     if (!v_trans) {
         // note: v->nb[1] <= v->nb[2]
         return ggml_view_4d(ctx, v,
@@ -1448,6 +1466,30 @@ ggml_tensor * llama_kv_cache::cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggm
     const int32_t ikv = map_layer_ids.at(il);
 
     auto * v = layers[ikv].v;
+
+    // Full KVarN record-format store for V (experimental, env-gated; FA / non-transposed V only).
+    {
+        const auto & Lv = layers[ikv];
+        if (Lv.kvarn_v_bits > 0 && Lv.v_records && Lv.v_stage && !v_trans) {
+            const int64_t hd_head  = v_cur->ne[0];
+            const int64_t hd_nhead = v_cur->ne[1];
+            const int64_t hd_ntok  = v_cur->ne[2];
+            const int slices = llama_kvarn_head_slices(hd_head);
+            ggml_tensor * cur = v_cur->type == GGML_TYPE_F32 ? v_cur : ggml_cast(ctx, v_cur, GGML_TYPE_F32);
+            cur = ggml_cont(ctx, cur);
+            if (slices > 1) {
+                cur = ggml_reshape_3d(ctx, cur, KVAR_N_GROUP, hd_nhead*slices, hd_ntok);
+            }
+            ggml_tensor * res = ggml_kvarn_store(ctx, cur, v_idxs, Lv.v_stage, Lv.v_records,
+                    Lv.kvarn_v_bits, /*sinkhorn_iters=*/8, /*value=*/true, /*stage_groups=*/2);
+            res->op_params[3] = (int32_t) hd_ntok;
+            res->op_params[4] = 0;
+            res->op_params[5] = slices;
+            res->op_params[9] = 1;
+            Lv.v_stage_live = res;
+            return res;
+        }
+    }
 
     const int64_t n_embd_head = v_cur->ne[0];
     const int64_t n_head      = v_cur->ne[1];
