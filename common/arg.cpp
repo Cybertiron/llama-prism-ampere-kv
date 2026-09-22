@@ -324,28 +324,21 @@ static ggml_type kv_cache_type_from_str(const std::string & s) {
     throw std::runtime_error("Unsupported cache type: " + s);
 }
 
-// Full KVarN (arXiv 2606.03458): kvarn2..kvarn8 are not ggml_types but a
-// structured per-128-tile KV-cache mode. We signal the cache via env vars
-// (bit width per K/V) to avoid threading a params object through cparams; the
-// placeholder storage type keeps the rest of the pipeline valid. Returns true
-// if the value was a kvarn type.
-static bool kvarn_kv_cache_type(const std::string & s, bool is_key, ggml_type * out) {
-    int bits = 0;
-    if      (s == "kvarn2") bits = 2;
-    else if (s == "kvarn3") bits = 3;
-    else if (s == "kvarn4") bits = 4;
-    else if (s == "kvarn5") bits = 5;
-    else if (s == "kvarn6") bits = 6;
-    else if (s == "kvarn8") bits = 8;
+// KVarN (Huawei, arXiv 2606.03458) is Hadamard variance-normalization on top of
+// low-bit KV storage. This fork's KV cache already applies the Hadamard rotation
+// (attn_rot_k/attn_rot_v, ggml_gen_hadamard) automatically to ANY quantized KV
+// type with head_dim % 64 == 0 -- i.e. the KVarN rotation is always on. So the
+// practical KVarN tiers map directly to the fork's matched low-bit KV types;
+// `-ctk kvarn3` == q3_K storage + auto-Hadamard. The paper's extra per-tile
+// Sinkhorn dual-axis scaling (record format) is not applied by this alias.
+static bool kvarn_kv_cache_type(const std::string & s, ggml_type * out) {
+    if      (s == "kvarn2") *out = GGML_TYPE_Q2_K;
+    else if (s == "kvarn3") *out = GGML_TYPE_Q3_K;
+    else if (s == "kvarn4") *out = GGML_TYPE_Q4_0;
+    else if (s == "kvarn5") *out = GGML_TYPE_Q5_0;
+    else if (s == "kvarn6") *out = GGML_TYPE_Q5_1;
+    else if (s == "kvarn8") *out = GGML_TYPE_Q8_0;
     else return false;
-    char buf[8];
-    snprintf(buf, sizeof(buf), "%d", bits);
-#ifdef _WIN32
-    _putenv_s(is_key ? "LLAMA_KVARN_K_BITS" : "LLAMA_KVARN_V_BITS", buf);
-#else
-    setenv(is_key ? "LLAMA_KVARN_K_BITS" : "LLAMA_KVARN_V_BITS", buf, 1);
-#endif
-    *out = GGML_TYPE_F16; // placeholder; cache switches to KVarN record mode from env
     return true;
 }
 
@@ -2461,7 +2454,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         ),
         [](common_params & params, const std::string & value) {
             ggml_type kvarn_t;
-            if (kvarn_kv_cache_type(value, /*is_key=*/true, &kvarn_t)) {
+            if (kvarn_kv_cache_type(value, &kvarn_t)) {
                 params.cache_type_k = kvarn_t;
             } else {
                 params.cache_type_k = kv_cache_type_from_str(value);
@@ -2479,7 +2472,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         ),
         [](common_params & params, const std::string & value) {
             ggml_type kvarn_t;
-            if (kvarn_kv_cache_type(value, /*is_key=*/false, &kvarn_t)) {
+            if (kvarn_kv_cache_type(value, &kvarn_t)) {
                 params.cache_type_v = kvarn_t;
             } else {
                 params.cache_type_v = kv_cache_type_from_str(value);
