@@ -324,11 +324,37 @@ static ggml_type kv_cache_type_from_str(const std::string & s) {
     throw std::runtime_error("Unsupported cache type: " + s);
 }
 
+// Full KVarN (arXiv 2606.03458): kvarn2..kvarn8 are not ggml_types but a
+// structured per-128-tile KV-cache mode. We signal the cache via env vars
+// (bit width per K/V) to avoid threading a params object through cparams; the
+// placeholder storage type keeps the rest of the pipeline valid. Returns true
+// if the value was a kvarn type.
+static bool kvarn_kv_cache_type(const std::string & s, bool is_key, ggml_type * out) {
+    int bits = 0;
+    if      (s == "kvarn2") bits = 2;
+    else if (s == "kvarn3") bits = 3;
+    else if (s == "kvarn4") bits = 4;
+    else if (s == "kvarn5") bits = 5;
+    else if (s == "kvarn6") bits = 6;
+    else if (s == "kvarn8") bits = 8;
+    else return false;
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%d", bits);
+#ifdef _WIN32
+    _putenv_s(is_key ? "LLAMA_KVARN_K_BITS" : "LLAMA_KVARN_V_BITS", buf);
+#else
+    setenv(is_key ? "LLAMA_KVARN_K_BITS" : "LLAMA_KVARN_V_BITS", buf, 1);
+#endif
+    *out = GGML_TYPE_F16; // placeholder; cache switches to KVarN record mode from env
+    return true;
+}
+
 static std::string get_all_kv_cache_types() {
     std::ostringstream msg;
     for (const auto & type : kv_cache_types) {
         msg << ggml_type_name(type) << (&type == &kv_cache_types.back() ? "" : ", ");
     }
+    msg << ", kvarn2, kvarn3, kvarn4, kvarn5, kvarn6, kvarn8";
     return msg.str();
 }
 
@@ -2434,7 +2460,12 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             ggml_type_name(params.cache_type_k)
         ),
         [](common_params & params, const std::string & value) {
-            params.cache_type_k = kv_cache_type_from_str(value);
+            ggml_type kvarn_t;
+            if (kvarn_kv_cache_type(value, /*is_key=*/true, &kvarn_t)) {
+                params.cache_type_k = kvarn_t;
+            } else {
+                params.cache_type_k = kv_cache_type_from_str(value);
+            }
         }
     ).set_env("LLAMA_ARG_CACHE_TYPE_K"));
     add_opt(common_arg(
@@ -2447,7 +2478,12 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             ggml_type_name(params.cache_type_v)
         ),
         [](common_params & params, const std::string & value) {
-            params.cache_type_v = kv_cache_type_from_str(value);
+            ggml_type kvarn_t;
+            if (kvarn_kv_cache_type(value, /*is_key=*/false, &kvarn_t)) {
+                params.cache_type_v = kvarn_t;
+            } else {
+                params.cache_type_v = kv_cache_type_from_str(value);
+            }
         }
     ).set_env("LLAMA_ARG_CACHE_TYPE_V"));
     add_opt(common_arg(
