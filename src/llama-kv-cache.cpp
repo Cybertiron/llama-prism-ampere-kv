@@ -1316,8 +1316,9 @@ ggml_tensor * llama_kv_cache::get_k(ggml_context * ctx, int32_t il, uint32_t n_k
     {
         const auto & Lk = layers[ikv];
         if (Lk.kvarn_k_bits > 0 && Lk.k_records && Lk.k_stage) {
-            ggml_tensor * stage_after = Lk.k_stage_live ? Lk.k_stage_live : Lk.k_stage;
-            ggml_tensor * indices = Lk.k_stage_live ? Lk.k_stage_live->src[1] : nullptr;
+            const bool fresh = Lk.k_stage_live && Lk.k_stage_live_ctx == ctx;
+            ggml_tensor * stage_after = fresh ? Lk.k_stage_live : Lk.k_stage;
+            ggml_tensor * indices = fresh ? Lk.k_stage_live->src[1] : nullptr;
             GGML_ASSERT(indices != nullptr && "KVarN get_k requires cpy_k earlier in the same build");
             const int slices = llama_kvarn_head_slices(hparams.n_embd_head_k(il));
             ggml_tensor * mat = ggml_kvarn_materialize(ctx, Lk.k_records, stage_after, indices,
@@ -1355,8 +1356,9 @@ ggml_tensor * llama_kv_cache::get_v(ggml_context * ctx, int32_t il, uint32_t n_k
     {
         const auto & Lv = layers[ikv];
         if (Lv.kvarn_v_bits > 0 && Lv.v_records && Lv.v_stage && !v_trans) {
-            ggml_tensor * stage_after = Lv.v_stage_live ? Lv.v_stage_live : Lv.v_stage;
-            ggml_tensor * indices = Lv.v_stage_live ? Lv.v_stage_live->src[1] : nullptr;
+            const bool fresh = Lv.v_stage_live && Lv.v_stage_live_ctx == ctx;
+            ggml_tensor * stage_after = fresh ? Lv.v_stage_live : Lv.v_stage;
+            ggml_tensor * indices = fresh ? Lv.v_stage_live->src[1] : nullptr;
             GGML_ASSERT(indices != nullptr && "KVarN get_v requires cpy_v earlier in the same build");
             const int slices = llama_kvarn_head_slices(hparams.n_embd_head_v(il));
             ggml_tensor * mat = ggml_kvarn_materialize(ctx, Lv.v_records, stage_after, indices,
@@ -1428,6 +1430,7 @@ ggml_tensor * llama_kv_cache::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggm
             res->op_params[5] = slices;            // head-wide Hadamard slices
             res->op_params[9] = 1;                 // commit completed records eagerly
             Lk.k_stage_live = res;
+            Lk.k_stage_live_ctx = ctx;
             return res;
         }
     }
@@ -1487,6 +1490,7 @@ ggml_tensor * llama_kv_cache::cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggm
             res->op_params[5] = slices;
             res->op_params[9] = 1;
             Lv.v_stage_live = res;
+            Lv.v_stage_live_ctx = ctx;
             return res;
         }
     }

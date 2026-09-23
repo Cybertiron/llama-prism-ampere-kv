@@ -263,8 +263,14 @@ private:
         int kvarn_v_bits = 0;
         // per-graph-build handoff: cpy_k publishes the store-result here so the
         // same build's get_k can chain materialize after it (data-dependency edge).
-        mutable ggml_tensor * k_stage_live = nullptr;
-        mutable ggml_tensor * v_stage_live = nullptr;
+        // The tensor belongs to the build's ggml_context and is freed when that
+        // build ends, so we also record which context it came from and only reuse
+        // it when the current build's ctx matches (otherwise it would be a
+        // dangling pointer from a previous, freed build).
+        mutable ggml_tensor        * k_stage_live     = nullptr;
+        mutable ggml_tensor        * v_stage_live     = nullptr;
+        mutable const ggml_context * k_stage_live_ctx = nullptr;
+        mutable const ggml_context * v_stage_live_ctx = nullptr;
     };
 
     bool v_trans = true;  // the value tensor is transposed
